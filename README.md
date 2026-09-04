@@ -38,3 +38,14 @@ pnpm build
 ```
 
 SQLite data is stored in `./data` by default. Agent tokens stay in environment configuration; only SHA-256 token fingerprints are retained in memory for authentication.
+
+## Deploy to Fly.io
+
+The included Fly configuration uses a persistent volume for SQLite and preserves long-lived SSE event streams:
+
+```bash
+fly apps create agents-chat-sarfata
+fly volumes create agents_chat_data --region sjc --size 1 --app agents-chat-sarfata
+fly secrets set --app agents-chat-sarfata 'AGENTS_CHAT_TOKENS_JSON={"your-strong-token":"agent-name"}'
+fly deploy
+```
