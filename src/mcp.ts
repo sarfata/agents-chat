@@ -2,9 +2,10 @@ import { createMcpHonoApp } from "@modelcontextprotocol/hono";
 import { createMcpHandler, McpServer, type ServerCapabilities } from "@modelcontextprotocol/server";
 import type { Context, Hono } from "hono";
 import { z } from "zod/v4";
-import { authenticate, type AgentIdentity, type Config } from "./config.js";
+import { type AgentIdentity, type Config } from "./config.js";
 import { ChatError, ChatService } from "./chat.js";
 import { CHAT_ACTIVITY_EVENT, EventsService } from "./events.js";
+import type { OAuthService } from "./oauth.js";
 
 const EmptyArgumentsSchema = z.record(z.string(), z.unknown()).optional().default({});
 const EventRequestSchema = z.object({
@@ -40,7 +41,7 @@ const MessageSchema = z.string().refine((value) => [...value].length >= 1 && [..
 
 export type McpEndpoint = { app: Hono; close(): Promise<void> };
 
-export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService): McpEndpoint {
+export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService, oauth: OAuthService): McpEndpoint {
   const publicHostname = new URL(config.publicBaseUrl).hostname;
   const allowedHosts = Array.from(new Set([publicHostname, "localhost", "127.0.0.1", "[::1]"]));
   const app = createMcpHonoApp({ host: "0.0.0.0", allowedHosts, allowedOrigins: allowedHosts });
@@ -54,24 +55,49 @@ export function createMcpEndpoint(config: Config, chat: ChatService, events: Eve
   });
 
   app.all("/", async (c: Context) => {
-    const agent = authenticate(config, c.req.header("Authorization"));
-    if (!agent) {
+    const authenticated = oauth.authenticate(c.req.header("Authorization"));
+    if (!authenticated) {
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401,
-        headers: { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" }
+        headers: { "Content-Type": "application/json", "WWW-Authenticate": oauth.challenge() }
       });
     }
+    const requiredScope = scopeForRequest(c.get("parsedBody"));
+    if (requiredScope && !authenticated.scopes.includes(requiredScope)) {
+      return new Response(JSON.stringify({ error: "insufficient_scope", required_scope: requiredScope }), {
+        status: 403,
+        headers: {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": `${oauth.challenge()} error="insufficient_scope", scope="${requiredScope}"`
+        }
+      });
+    }
+    const { agent } = authenticated;
     return handler.fetch(c.req.raw, {
       parsedBody: c.get("parsedBody"),
       authInfo: {
-        token: c.req.header("Authorization")!.slice("Bearer ".length),
-        clientId: agent.id,
-        scopes: ["chat", "events:read"],
+        token: authenticated.token,
+        clientId: authenticated.clientId,
+        scopes: authenticated.scopes,
         extra: { agent }
       }
     });
   });
   return { app, close: () => handler.close() };
+}
+
+function scopeForRequest(body: unknown): "chat:read" | "chat:write" | "events:read" | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const message = body as { method?: unknown; params?: unknown };
+  if (typeof message.method !== "string") return undefined;
+  if (message.method.startsWith("events/")) return "events:read";
+  if (message.method !== "tools/call" || !message.params || typeof message.params !== "object" || Array.isArray(message.params)) {
+    return undefined;
+  }
+  const name = (message.params as { name?: unknown }).name;
+  if (name === "channels_list") return "chat:read";
+  if (["channels_create", "channels_join", "messages_post"].includes(String(name))) return "chat:write";
+  return undefined;
 }
 
 function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity): McpServer {

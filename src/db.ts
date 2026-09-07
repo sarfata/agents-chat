@@ -46,6 +46,71 @@ export function openDb(databaseUrl: string): Db {
       primary key (event_row_id, agent_id)
     );
     create index if not exists event_recipients_agent_event_idx on event_recipients(agent_id, event_row_id);
+
+    create table if not exists users (
+      id text primary key,
+      provider text not null,
+      provider_subject text not null,
+      display_name text not null,
+      created_at text not null,
+      updated_at text not null,
+      unique(provider, provider_subject)
+    );
+    create table if not exists oauth_clients (
+      client_id text primary key,
+      client_name text not null,
+      redirect_uris_json text not null,
+      application_type text not null,
+      created_at text not null
+    );
+    create table if not exists oauth_transactions (
+      id text primary key,
+      client_id text not null references oauth_clients(client_id) on delete cascade,
+      redirect_uri text not null,
+      code_challenge text not null,
+      resource text not null,
+      scope text not null,
+      client_state text not null,
+      user_id text references users(id) on delete cascade,
+      approval_hash text,
+      expires_at text not null,
+      created_at text not null
+    );
+    create table if not exists oauth_codes (
+      code_hash text primary key,
+      user_id text not null references users(id) on delete cascade,
+      client_id text not null references oauth_clients(client_id) on delete cascade,
+      redirect_uri text not null,
+      code_challenge text not null,
+      resource text not null,
+      scope text not null,
+      expires_at text not null,
+      used_at text
+    );
+    create table if not exists oauth_access_tokens (
+      token_hash text primary key,
+      user_id text not null references users(id) on delete cascade,
+      client_id text not null references oauth_clients(client_id) on delete cascade,
+      resource text not null,
+      scope text not null,
+      expires_at text not null,
+      created_at text not null,
+      last_used_at text
+    );
+    create table if not exists oauth_refresh_tokens (
+      token_hash text primary key,
+      family_id text not null,
+      user_id text not null references users(id) on delete cascade,
+      client_id text not null references oauth_clients(client_id) on delete cascade,
+      resource text not null,
+      scope text not null,
+      expires_at text not null,
+      created_at text not null,
+      revoked_at text
+    );
+    create index if not exists oauth_access_tokens_expiry_idx on oauth_access_tokens(expires_at);
+    create index if not exists oauth_refresh_tokens_family_idx on oauth_refresh_tokens(family_id);
+    create index if not exists oauth_transactions_expiry_idx on oauth_transactions(expires_at);
   `);
   return db;
 }

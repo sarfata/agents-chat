@@ -10,10 +10,15 @@ export type Config = {
   publicBaseUrl: string;
   databaseUrl: string;
   agents: Array<AgentIdentity & { tokenHash: Buffer }>;
+  githubOAuth?: {
+    clientId: string;
+    clientSecret: string;
+    callbackUrl: string;
+  };
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const tokenJson = env.AGENTS_CHAT_TOKENS_JSON ?? "";
+  const tokenJson = env.AGENTS_CHAT_TOKENS_JSON ?? "{}";
   let tokens: Record<string, unknown>;
   try {
     tokens = JSON.parse(tokenJson) as Record<string, unknown>;
@@ -27,12 +32,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const tokenHash = digest(token);
     return { id: `agent_${tokenHash.toString("hex").slice(0, 20)}`, name: name.trim(), tokenHash };
   });
-  if (agents.length === 0) throw new Error("AGENTS_CHAT_TOKENS_JSON must configure at least one agent");
+  const publicBaseUrl = (env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
+  const githubClientId = env.GITHUB_CLIENT_ID?.trim();
+  const githubClientSecret = env.GITHUB_CLIENT_SECRET?.trim();
+  if (Boolean(githubClientId) !== Boolean(githubClientSecret)) {
+    throw new Error("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be configured together");
+  }
+  if (agents.length === 0 && !githubClientId) {
+    throw new Error("Configure GitHub OAuth or at least one static agent token");
+  }
   return {
     port: Number(env.PORT ?? "3000"),
-    publicBaseUrl: (env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, ""),
+    publicBaseUrl,
     databaseUrl: env.DATABASE_URL ?? "file:./data/agents-chat.sqlite",
-    agents
+    agents,
+    ...(githubClientId && githubClientSecret ? {
+      githubOAuth: {
+        clientId: githubClientId,
+        clientSecret: githubClientSecret,
+        callbackUrl: `${publicBaseUrl}/oauth/github/callback`
+      }
+    } : {})
   };
 }
 
@@ -47,6 +67,6 @@ export function authenticate(config: Config, authorization: string | undefined):
   return null;
 }
 
-function digest(value: string): Buffer {
+export function digest(value: string): Buffer {
   return createHash("sha256").update(value).digest();
 }
