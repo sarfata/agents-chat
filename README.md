@@ -52,6 +52,14 @@ pnpm test
 pnpm build
 ```
 
+Browser regression tests exercise the consent page's security policy and the
+cross-origin callback after one approval or cancellation click. GitHub identity
+is stubbed locally; the consent, token exchange, and MCP request are real:
+
+```bash
+pnpm test:browser # Uses installed Google Chrome in a separate headless profile.
+```
+
 SQLite data is stored in `./data` by default. OAuth access and refresh tokens are stored only as SHA-256 hashes. GitHub client credentials and any optional static agent tokens stay in environment configuration.
 
 ## Deploy to Fly.io

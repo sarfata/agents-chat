@@ -71,6 +71,8 @@ async function completeAuthorization(
 
   const callback = await fixture.app.request(`/oauth/github/callback?state=${encodeURIComponent(transactionId)}&code=github-code`);
   expect(callback.status).toBe(200);
+  expect(callback.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:34567;");
+  expect(callback.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
   const consent = await callback.text();
   expect(consent).toContain("Test MCP client");
   expect(consent).toContain("octo-agent");
@@ -294,7 +296,10 @@ describe("GitHub-backed MCP OAuth", () => {
 
   it("rejects unsafe dynamic client redirect URIs", async () => {
     const fixture = setup();
-    for (const redirectUri of ["http://evil.example/callback", "https://good.example/callback#fragment", "not-a-url"]) {
+    for (const redirectUri of [
+      "http://evil.example/callback", "https://good.example/callback#fragment", "not-a-url",
+      "https://evil.example;script-src/callback", "https://*.example/callback"
+    ]) {
       const response = await fixture.app.request("/oauth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

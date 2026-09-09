@@ -247,7 +247,10 @@ export class OAuthService {
     const client = this.db.prepare(`select client_name from oauth_clients where client_id = ?`)
       .get(transaction.client_id) as { client_name: string };
     c.header("Cache-Control", "no-store");
-    c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    // Chromium applies form-action to redirects after the consent POST too.
+    // The exact registered callback origin must be allowed, including its port.
+    const callbackOrigin = new URL(transaction.redirect_uri).origin;
+    c.header("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${callbackOrigin}; frame-ancestors 'none'; base-uri 'none'`);
     c.header("X-Frame-Options", "DENY");
     return c.html(consentPage({
       transactionId,
@@ -464,6 +467,9 @@ function validRedirectUri(value: string): boolean {
   try {
     const url = new URL(value);
     if (url.hash || url.username || url.password) return false;
+    // This origin is also a CSP source. Reject URL-valid host characters that
+    // could inject a directive or widen it with a wildcard.
+    if (!/^https?:\/\/(?:[a-z0-9._-]+|\[[a-f0-9:]+\])(?::\d+)?$/i.test(url.origin)) return false;
     if (url.protocol === "https:") return true;
     return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   } catch {
