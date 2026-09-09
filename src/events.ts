@@ -31,7 +31,7 @@ export class EventsService {
       events: [{
         name: CHAT_ACTIVITY_EVENT,
         description: "Channel creation, joins, and messages for channels the authenticated agent had joined when the activity occurred.",
-        delivery: ["poll", "push"] as const,
+        delivery: ["poll", "push", "webhook"] as const,
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         payloadSchema: {
           type: "object",
@@ -48,6 +48,23 @@ export class EventsService {
         }
       }]
     };
+  }
+
+  webhookStart(agent: AgentIdentity, input: EventRequest) {
+    this.assertRequest(input);
+    const head = this.head();
+    if (input.cursor == null) return { cursor: formatCursor(head), truncated: false };
+    const requested = parseCursor(input.cursor);
+    let start = Math.min(requested, head);
+    let truncated = requested > head;
+    if (input.maxAgeMs !== undefined) {
+      const cutoff = new Date(Math.max(0, Date.now() - input.maxAgeMs)).toISOString();
+      const skipped = this.db.prepare(`select max(e.id) as id from chat_events e
+        join event_recipients r on r.event_row_id = e.id
+        where r.agent_id = ? and e.id > ? and e.occurred_at < ?`).get(agent.id, start, cutoff) as { id: number | null };
+      if (skipped.id !== null) { start = skipped.id; truncated = true; }
+    }
+    return { cursor: formatCursor(start), truncated };
   }
 
   poll(agent: AgentIdentity, input: PollEventRequest) {
@@ -191,8 +208,9 @@ export function formatCursor(position: number): string {
 
 function parseCursor(cursor: string): number {
   const match = /^chat-event:(\d+)$/.exec(cursor);
-  if (!match) throw new ProtocolError(-32602, "InvalidParams", { field: "cursor" });
-  return Number(match[1]);
+  const value = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(value) || value < 0) throw new ProtocolError(-32602, "InvalidParams", { field: "cursor" });
+  return value;
 }
 
 function withSubscriptionId(params: Record<string, unknown>, requestId: RequestId) {

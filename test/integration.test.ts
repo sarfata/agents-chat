@@ -26,7 +26,7 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.close();
 });
 
-function setup() {
+function setup(options: Parameters<typeof createApp>[1] = {}) {
   const config = loadConfig({
     PORT: "3000",
     PUBLIC_BASE_URL: "http://chat.example.test",
@@ -37,7 +37,7 @@ function setup() {
       [tokens.charlie]: "charlie"
     })
   });
-  const fixture = createApp(config);
+  const fixture = createApp(config, options);
   fixtures.push(fixture);
   return fixture;
 }
@@ -114,7 +114,7 @@ describe("Agents Chat MCP server", () => {
       expect(guide).toContain(method);
     }
     expect(guide).toContain("1–200 Unicode code points");
-    expect(guide).toContain("are not implemented");
+    expect(guide).toContain("events/subscribe");
     const alias = await fixture.app.request("/AGENTS.md");
     expect(alias.status).toBe(308);
     expect(alias.headers.get("location")).toBe("/agents.md");
@@ -148,7 +148,25 @@ describe("Agents Chat MCP server", () => {
       "channels_create", "channels_join", "channels_list", "messages_post"
     ]);
     const events = await rpc(fixture.app, tokens.alice, "events/list");
-    expect(events.result?.events[0]).toMatchObject({ name: CHAT_ACTIVITY_EVENT, delivery: ["poll", "push"] });
+    expect(events.result?.events[0]).toMatchObject({ name: CHAT_ACTIVITY_EVENT, delivery: ["poll", "push", "webhook"] });
+  });
+
+  it("supports webhook subscribe and unsubscribe through the official MCP handler", async () => {
+    const deliveries: Array<{ body: Record<string, any>; headers: Record<string, string> }> = [];
+    const fixture = setup({ webhookClient: { async post(_url, raw, headers) {
+      const body = JSON.parse(raw);
+      deliveries.push({ body, headers });
+      return { status: 200, body: JSON.stringify({ challenge: body.challenge }) };
+    } } });
+    const created = await callTool(fixture.app, tokens.alice, "channels_create", { name: "webhook" });
+    const delivery = { mode: "webhook", url: "https://receiver.example/hooks", secret: `whsec_${Buffer.alloc(32, 42).toString("base64")}` };
+    const subscription = await rpc(fixture.app, tokens.alice, "events/subscribe", { name: CHAT_ACTIVITY_EVENT, delivery, ttlMs: null });
+    expect(subscription.result).toMatchObject({ id: expect.stringMatching(/^sub_/), refreshBefore: expect.any(String), truncated: false });
+    expect(deliveries[0].body.type).toBe("verification");
+    await callTool(fixture.app, tokens.alice, "messages_post", { channelId: created.structuredContent?.channel.id, text: "webhook MCP" });
+    expect(deliveries[1].body).toMatchObject({ name: CHAT_ACTIVITY_EVENT, data: { message: { text: "webhook MCP" } } });
+    expect(deliveries[1].headers["X-MCP-Subscription-Id"]).toBe(subscription.result?.id);
+    await rpc(fixture.app, tokens.alice, "events/unsubscribe", { name: CHAT_ACTIVITY_EVENT, delivery: { url: delivery.url } });
   });
 
   it("creates, lists, joins, posts, and isolates event history by membership", async () => {

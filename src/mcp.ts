@@ -6,6 +6,7 @@ import { type AgentIdentity, type Config } from "./config.js";
 import { ChatError, ChatService } from "./chat.js";
 import { CHAT_ACTIVITY_EVENT, EventsService } from "./events.js";
 import type { OAuthService } from "./oauth.js";
+import type { WebhookService } from "./webhooks.js";
 
 const EmptyArgumentsSchema = z.record(z.string(), z.unknown()).optional().default({});
 const EventRequestSchema = z.object({
@@ -32,6 +33,15 @@ const PollResultSchema = z.object({
   nextPollMs: z.number().int()
 });
 const EmptyResultSchema = z.object({ _meta: z.record(z.string(), z.unknown()).optional() });
+const SubscribeRequestSchema = EventRequestSchema.extend({
+  delivery: z.object({ mode: z.string(), url: z.string().max(2048), secret: z.string().max(100) }),
+  ttlMs: z.number().int().nonnegative().nullable().optional()
+});
+const UnsubscribeRequestSchema = z.object({ name: z.string(), arguments: EmptyArgumentsSchema, delivery: z.object({ url: z.string().max(2048) }) });
+const SubscribeResultSchema = z.object({
+  id: z.string(), refreshBefore: z.string().nullable(), cursor: z.string(), truncated: z.boolean(),
+  deliveryStatus: z.object({ active: z.boolean(), lastDeliveryAt: z.string().optional(), lastError: z.string().nullable(), failedSince: z.string().optional() })
+});
 
 const ChannelNameSchema = z.string().trim().min(1).max(40)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/, "Use letters, numbers, underscores, or hyphens");
@@ -41,14 +51,14 @@ const MessageSchema = z.string().refine((value) => [...value].length >= 1 && [..
 
 export type McpEndpoint = { app: Hono; close(): Promise<void> };
 
-export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService, oauth: OAuthService): McpEndpoint {
+export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService, oauth: OAuthService, webhooks: WebhookService): McpEndpoint {
   const publicHostname = new URL(config.publicBaseUrl).hostname;
   const allowedHosts = Array.from(new Set([publicHostname, "localhost", "127.0.0.1", "[::1]"]));
   const app = createMcpHonoApp({ host: "0.0.0.0", allowedHosts, allowedOrigins: allowedHosts });
   const handler = createMcpHandler((context) => {
     const agent = context.authInfo?.extra?.agent as AgentIdentity | undefined;
     if (!agent) throw new Error("Authenticated agent context is required");
-    return createAgentServer(chat, events, agent, `${config.publicBaseUrl}/agents.md`);
+    return createAgentServer(chat, events, agent, `${config.publicBaseUrl}/agents.md`, webhooks);
   }, {
     responseMode: "auto",
     onerror: (error) => console.error("MCP request failed", error)
@@ -100,14 +110,14 @@ function scopeForRequest(body: unknown): "chat:read" | "chat:write" | "events:re
   return undefined;
 }
 
-function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity, guideUrl: string): McpServer {
+function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity, guideUrl: string, webhooks: WebhookService): McpServer {
   const capabilities = {
     events: { listChanged: false },
     extensions: { "io.modelcontextprotocol/events": { listChanged: false } }
   } as ServerCapabilities;
   const server = new McpServer({ name: "agents-chat", version: "0.1.0" }, {
     capabilities,
-    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Use events/poll or events/stream for ${CHAT_ACTIVITY_EVENT} to receive activity from joined channels. Read the usage guide at ${guideUrl}.`
+    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Receive ${CHAT_ACTIVITY_EVENT} from all joined channels via events/poll, events/stream (push), or events/subscribe (signed HTTPS webhooks). Read the usage guide at ${guideUrl}.`
   });
 
   server.registerTool("channels_list", {
@@ -137,6 +147,8 @@ function createAgentServer(chat: ChatService, events: EventsService, agent: Agen
   server.server.setRequestHandler("events/list", { params: ListRequestSchema, result: ListResultSchema }, async () => events.list());
   server.server.setRequestHandler("events/poll", { params: PollRequestSchema, result: PollResultSchema }, async (params) => events.poll(agent, params));
   server.server.setRequestHandler("events/stream", { params: EventRequestSchema, result: EmptyResultSchema }, async (params, ctx) => events.stream(agent, params, ctx));
+  server.server.setRequestHandler("events/subscribe", { params: SubscribeRequestSchema, result: SubscribeResultSchema }, async (params) => webhooks.subscribe(agent, params));
+  server.server.setRequestHandler("events/unsubscribe", { params: UnsubscribeRequestSchema, result: EmptyResultSchema }, async (params) => webhooks.unsubscribe(agent, params));
   return server;
 }
 
