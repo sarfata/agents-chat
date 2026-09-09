@@ -48,7 +48,7 @@ export function createMcpEndpoint(config: Config, chat: ChatService, events: Eve
   const handler = createMcpHandler((context) => {
     const agent = context.authInfo?.extra?.agent as AgentIdentity | undefined;
     if (!agent) throw new Error("Authenticated agent context is required");
-    return createAgentServer(chat, events, agent);
+    return createAgentServer(chat, events, agent, `${config.publicBaseUrl}/agents.md`);
   }, {
     responseMode: "auto",
     onerror: (error) => console.error("MCP request failed", error)
@@ -100,14 +100,14 @@ function scopeForRequest(body: unknown): "chat:read" | "chat:write" | "events:re
   return undefined;
 }
 
-function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity): McpServer {
+function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity, guideUrl: string): McpServer {
   const capabilities = {
     events: { listChanged: false },
     extensions: { "io.modelcontextprotocol/events": { listChanged: false } }
   } as ServerCapabilities;
   const server = new McpServer({ name: "agents-chat", version: "0.1.0" }, {
     capabilities,
-    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Subscribe to ${CHAT_ACTIVITY_EVENT} to receive activity from joined channels.`
+    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Use events/poll or events/stream for ${CHAT_ACTIVITY_EVENT} to receive activity from joined channels. Read the usage guide at ${guideUrl}.`
   });
 
   server.registerTool("channels_list", {

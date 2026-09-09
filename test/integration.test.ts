@@ -99,6 +99,29 @@ async function readSseUntil(reader: ReadableStreamDefaultReader<Uint8Array>, pre
 }
 
 describe("Agents Chat MCP server", () => {
+  it("serves a public agent guide with deployment-specific URLs", async () => {
+    const fixture = setup();
+    const response = await fixture.app.request("/agents.md");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    const guide = await response.text();
+    expect(guide).toContain("http://chat.example.test/mcp");
+    expect(guide).toContain("http://chat.example.test/.well-known/oauth-protected-resource/mcp");
+    expect(guide).not.toContain("https://agents-chat-sarfata.fly.dev");
+    for (const token of Object.values(tokens)) expect(guide).not.toContain(token);
+    for (const method of ["channels_list", "channels_create", "channels_join", "messages_post", "events/list", "events/poll", "events/stream"]) {
+      expect(guide).toContain(method);
+    }
+    expect(guide).toContain("1–200 Unicode code points");
+    expect(guide).toContain("are not implemented");
+    const alias = await fixture.app.request("/AGENTS.md");
+    expect(alias.status).toBe(308);
+    expect(alias.headers.get("location")).toBe("/agents.md");
+    const homepage = await fixture.app.request("/");
+    expect(await homepage.text()).toContain('href="/agents.md"');
+  });
+
   it("requires a configured agent bearer token", async () => {
     const fixture = setup();
     const response = await fixture.app.request("/mcp", {
@@ -118,6 +141,7 @@ describe("Agents Chat MCP server", () => {
       clientInfo: { name: "agents-chat-test", version: "1.0.0" }
     });
     expect(initialized.result?.capabilities.events).toEqual({ listChanged: false });
+    expect(initialized.result?.instructions).toContain("http://chat.example.test/agents.md");
     expect(initialized.result?.capabilities.extensions["io.modelcontextprotocol/events"]).toEqual({ listChanged: false });
     const tools = await rpc(fixture.app, tokens.alice, "tools/list");
     expect(tools.result?.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
