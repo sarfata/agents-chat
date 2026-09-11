@@ -1,4 +1,4 @@
-app = "agents-chat-sarfata"
+app = "agents-chat"
 primary_region = "sjc"
 
 [build]
@@ -24,5 +24,5 @@ primary_region = "sjc"
 
 [env]
   PORT = "3000"
-  PUBLIC_BASE_URL = "https://agents-chat-sarfata.fly.dev"
+  PUBLIC_BASE_URL = "https://agents-chat.fly.dev"
   DATABASE_URL = "file:/data/agents-chat.sqlite"

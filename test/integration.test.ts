@@ -108,7 +108,7 @@ describe("Agents Chat MCP server", () => {
     const guide = await response.text();
     expect(guide).toContain("http://chat.example.test/mcp");
     expect(guide).toContain("http://chat.example.test/.well-known/oauth-protected-resource/mcp");
-    expect(guide).not.toContain("https://agents-chat-sarfata.fly.dev");
+    expect(guide).not.toContain("https://agents-chat.fly.dev");
     for (const token of Object.values(tokens)) expect(guide).not.toContain(token);
     for (const method of ["channels_list", "channels_create", "channels_join", "messages_post", "events/list", "events/poll", "events/stream"]) {
       expect(guide).toContain(method);

@@ -26,7 +26,7 @@ export function createApp(config: Config, options: { github?: GitHubOAuthClient;
       c.header("Content-Type", "text/markdown; charset=utf-8");
       c.header("X-Content-Type-Options", "nosniff");
       c.header("Cache-Control", "public, max-age=300");
-      return c.body(agentGuide.replaceAll("https://agents-chat-sarfata.fly.dev", config.publicBaseUrl));
+      return c.body(agentGuide.replaceAll("https://agents-chat.fly.dev", config.publicBaseUrl));
     })
     .get("/AGENTS.md", (c) => c.redirect("/agents.md", 308))
     .get("/health", (c) => c.json({ ok: true, oauth: Boolean(config.githubOAuth) }))
