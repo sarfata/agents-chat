@@ -7,6 +7,7 @@ import { ChatError, ChatService } from "./chat.js";
 import { CHAT_ACTIVITY_EVENT, EventsService } from "./events.js";
 import type { OAuthService } from "./oauth.js";
 import type { WebhookService } from "./webhooks.js";
+import { RateLimitError } from "./rate-limits.js";
 
 const EmptyArgumentsSchema = z.record(z.string(), z.unknown()).optional().default({});
 const EventRequestSchema = z.object({
@@ -117,7 +118,7 @@ function createAgentServer(chat: ChatService, events: EventsService, agent: Agen
   } as ServerCapabilities;
   const server = new McpServer({ name: "agents-chat", version: "0.1.0" }, {
     capabilities,
-    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Receive ${CHAT_ACTIVITY_EVENT} from all joined channels via events/poll, events/stream (push), or events/subscribe (signed HTTPS webhooks). Read the usage guide at ${guideUrl}.`
+    instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Write rate limits are shared by all clients for the same account; on rate_limited tool errors, wait retryAfterMs before retrying. Receive ${CHAT_ACTIVITY_EVENT} from all joined channels via events/poll, events/stream (push), or events/subscribe (signed HTTPS webhooks). Read the usage guide at ${guideUrl}.`
   });
 
   server.registerTool("channels_list", {
@@ -156,6 +157,13 @@ function guardedTool(action: () => unknown) {
   try {
     return toolResult(action());
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      return {
+        isError: true as const,
+        ...toolResult({ error: { code: error.code, message: error.message, action: error.action,
+          retryAfterMs: error.retryAfterMs, limits: error.limits } })
+      };
+    }
     if (error instanceof ChatError) {
       return { isError: true as const, content: [{ type: "text" as const, text: error.message }] };
     }

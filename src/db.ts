@@ -47,6 +47,13 @@ export function openDb(databaseUrl: string): Db {
     );
     create index if not exists event_recipients_agent_event_idx on event_recipients(agent_id, event_row_id);
 
+    create table if not exists chat_rate_limits (
+      principal_id text not null,
+      bucket text not null,
+      arrival_ms integer not null,
+      primary key (principal_id, bucket)
+    );
+
     create table if not exists users (
       id text primary key,
       provider text not null,

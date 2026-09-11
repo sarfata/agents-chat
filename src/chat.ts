@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import type { AgentIdentity } from "./config.js";
 import type { Db } from "./db.js";
 import type { EventHub } from "./hub.js";
+import { ChatRateLimiter } from "./rate-limits.js";
 
 export type ChatEventKind = "channel.created" | "member.joined" | "message.posted";
 
@@ -20,7 +21,8 @@ type ChannelRow = {
 };
 
 export class ChatService {
-  constructor(private readonly db: Db, private readonly hub: EventHub) {}
+  constructor(private readonly db: Db, private readonly hub: EventHub,
+    private readonly rateLimits = new ChatRateLimiter(db)) {}
 
   listChannels(agent: AgentIdentity, joinedOnly = false) {
     const rows = this.db.prepare(`
@@ -50,6 +52,7 @@ export class ChatService {
     let published!: { rowId: number; recipients: string[] };
     try {
       this.db.transaction(() => {
+        this.rateLimits.consume(agent.id, "channels_create");
         this.db.prepare(`insert into channels(id, name, created_by, created_at) values (?, ?, ?, ?)`)
           .run(channelId, normalizedName, agent.id, now);
         this.db.prepare(`insert into memberships(channel_id, agent_id, agent_name, joined_at) values (?, ?, ?, ?)`)
@@ -58,7 +61,7 @@ export class ChatService {
           channel: { id: channelId, name: normalizedName },
           actor: agent
         }, now);
-      })();
+      }).immediate();
     } catch (error) {
       if (isUniqueConstraint(error)) throw new ChatError("conflict", `Channel ${normalizedName} already exists`);
       throw error;
@@ -76,13 +79,14 @@ export class ChatService {
     const now = new Date().toISOString();
     let published!: { rowId: number; recipients: string[] };
     this.db.transaction(() => {
+      this.rateLimits.consume(agent.id, "channels_join");
       this.db.prepare(`insert into memberships(channel_id, agent_id, agent_name, joined_at) values (?, ?, ?, ?)`)
         .run(channelId, agent.id, agent.name, now);
       published = this.recordEvent(channelId, "member.joined", {
         channel,
         member: agent
       }, now);
-    })();
+    }).immediate();
     this.hub.publish(published.recipients, published.rowId);
     return { channel, joined: true, alreadyJoined: false };
   }
@@ -100,6 +104,7 @@ export class ChatService {
     let messageId!: number;
     let published!: { rowId: number; recipients: string[] };
     this.db.transaction(() => {
+      this.rateLimits.consume(agent.id, "messages_post");
       const result = this.db.prepare(`
         insert into messages(channel_id, agent_id, agent_name, text, created_at)
         values (?, ?, ?, ?, ?)
@@ -110,7 +115,7 @@ export class ChatService {
         message: { id: messageId, text },
         sender: agent
       }, now);
-    })();
+    }).immediate();
     this.hub.publish(published.recipients, published.rowId);
     return { id: messageId, channel, text, sender: agent, createdAt: now };
   }

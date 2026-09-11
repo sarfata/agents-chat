@@ -7,6 +7,7 @@ const fixtures: Array<ReturnType<typeof createApp>> = [];
 
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.close();
+  vi.restoreAllMocks();
 });
 
 function setup() {
@@ -106,6 +107,76 @@ async function tokenRequest(fixture: ReturnType<typeof setup>, body: Record<stri
 }
 
 describe("GitHub-backed MCP OAuth", () => {
+  it("shares write limits across clients, refreshes and logins for one GitHub account", async () => {
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const fixture = setup();
+    async function login() {
+      const authorization = await completeAuthorization(fixture);
+      const response = await tokenRequest(fixture, {
+        grant_type: "authorization_code", code: authorization.code,
+        client_id: authorization.clientId, redirect_uri: authorization.redirectUri,
+        code_verifier: authorization.verifier, resource: "https://chat.example.test/mcp"
+      });
+      expect(response.status).toBe(200);
+      return { clientId: authorization.clientId, ...await response.json() as { access_token: string; refresh_token: string } };
+    }
+    async function tool(token: string, name: string, args: Record<string, unknown> = {}) {
+      const response = await fixture.app.request("/mcp", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json", Host: "chat.example.test" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      const messages = response.headers.get("content-type")?.includes("text/event-stream")
+        ? text.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5)))
+        : [JSON.parse(text)];
+      const message = messages.find((item) => item.id === 1);
+      expect(message.error).toBeUndefined();
+      return message.result;
+    }
+    const first = await login();
+    const second = await login();
+    expect(first.clientId).not.toBe(second.clientId);
+    expect(first.access_token).not.toBe(second.access_token);
+    expect(fixture.db.prepare(`select count(*) as count from users`).get()).toEqual({ count: 1 });
+    const created = await tool(first.access_token, "channels_create", { name: "shared-budget" });
+    const channelId = created.structuredContent.channel.id;
+    const outcomes = await Promise.all(Array.from({ length: 70 }, (_, i) => tool(i % 2 ? first.access_token : second.access_token,
+      "messages_post", { channelId, text: `shared-account message ${i}` })));
+    expect(outcomes.filter((result) => !result.isError)).toHaveLength(60);
+    const limited = outcomes.filter((result) => result.isError);
+    expect(limited).toHaveLength(10);
+    for (const result of limited) {
+      expect(result.structuredContent).toMatchObject({ error: { code: "rate_limited", action: "messages_post", retryAfterMs: 1000 } });
+      expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+    }
+    expect(fixture.db.prepare(`select count(*) as count from messages`).get()).toEqual({ count: 60 });
+    expect(fixture.db.prepare(`select count(*) as count from chat_events`).get()).toEqual({ count: 61 });
+    expect((await tool(second.access_token, "channels_list")).isError).not.toBe(true);
+
+    const refreshResponse = await tokenRequest(fixture, {
+      grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: first.clientId,
+      resource: "https://chat.example.test/mcp"
+    });
+    expect(refreshResponse.status).toBe(200);
+    const refreshed = await refreshResponse.json() as { access_token: string };
+    expect((await tool(refreshed.access_token, "messages_post", { channelId, text: "refresh is not a bypass" })).isError).toBe(true);
+    fixture.github.identify.mockResolvedValue({ id: 12345678, login: "octo-agent-renamed" });
+    const renamed = await login();
+    expect((await tool(renamed.access_token, "messages_post", { channelId, text: "rename is not a bypass" })).structuredContent.error.code).toBe("rate_limited");
+    expect(fixture.db.prepare(`select count(*) as count from users`).get()).toEqual({ count: 1 });
+
+    // A different numeric GitHub account ID gets its own budget, even when the
+    // display login matches an earlier login of the first account.
+    fixture.github.identify.mockResolvedValue({ id: 87654321, login: "octo-agent" });
+    const other = await login();
+    expect((await tool(other.access_token, "channels_join", { channelId })).isError).not.toBe(true);
+    expect((await tool(other.access_token, "messages_post", { channelId, text: "independent human budget" })).isError).not.toBe(true);
+    expect(fixture.db.prepare(`select count(*) as count from users`).get()).toEqual({ count: 2 });
+  });
+
   it("publishes MCP OAuth discovery metadata", async () => {
     const fixture = setup();
     const resource = await fixture.app.request("/.well-known/oauth-protected-resource/mcp");
