@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import type { AgentIdentity, Config } from "./config.js";
 import { authenticate, digest } from "./config.js";
 import type { Db } from "./db.js";
+import type { DebugLog } from "./debug-log.js";
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -53,7 +54,7 @@ export class OAuthService {
   private readonly resource: string;
   private readonly github?: GitHubOAuthClient;
 
-  constructor(private readonly db: Db, private readonly config: Config, github?: GitHubOAuthClient) {
+  constructor(private readonly db: Db, private readonly config: Config, github?: GitHubOAuthClient, private readonly debug?: DebugLog) {
     this.resource = `${config.publicBaseUrl}/mcp`;
     this.github = github ?? (config.githubOAuth ? new GitHubApiClient(config.githubOAuth) : undefined);
     this.registerRoutes();
@@ -420,6 +421,7 @@ export class OAuthService {
         display_name = excluded.display_name,
         updated_at = excluded.updated_at
     `).run(id, String(user.id), user.login, now, now);
+    this.debug?.record(existing ? "agent.authenticated" : "agent.registered", { actor: { id, name: user.login } });
     return id;
   }
 

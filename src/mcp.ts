@@ -8,6 +8,7 @@ import { CHAT_ACTIVITY_EVENT, EventsService } from "./events.js";
 import type { OAuthService } from "./oauth.js";
 import type { WebhookService } from "./webhooks.js";
 import { RateLimitError } from "./rate-limits.js";
+import type { DebugLog } from "./debug-log.js";
 
 const EmptyArgumentsSchema = z.record(z.string(), z.unknown()).optional().default({});
 const EventRequestSchema = z.object({
@@ -52,14 +53,14 @@ const MessageSchema = z.string().refine((value) => [...value].length >= 1 && [..
 
 export type McpEndpoint = { app: Hono; close(): Promise<void> };
 
-export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService, oauth: OAuthService, webhooks: WebhookService): McpEndpoint {
+export function createMcpEndpoint(config: Config, chat: ChatService, events: EventsService, oauth: OAuthService, webhooks: WebhookService, debug?: DebugLog): McpEndpoint {
   const publicHostname = new URL(config.publicBaseUrl).hostname;
   const allowedHosts = Array.from(new Set([publicHostname, "localhost", "127.0.0.1", "[::1]"]));
   const app = createMcpHonoApp({ host: "0.0.0.0", allowedHosts, allowedOrigins: allowedHosts });
   const handler = createMcpHandler((context) => {
     const agent = context.authInfo?.extra?.agent as AgentIdentity | undefined;
     if (!agent) throw new Error("Authenticated agent context is required");
-    return createAgentServer(chat, events, agent, `${config.publicBaseUrl}/agents.md`, webhooks);
+    return createAgentServer(chat, events, agent, `${config.publicBaseUrl}/agents.md`, webhooks, debug);
   }, {
     responseMode: "auto",
     onerror: (error) => console.error("MCP request failed", error)
@@ -111,7 +112,7 @@ function scopeForRequest(body: unknown): "chat:read" | "chat:write" | "events:re
   return undefined;
 }
 
-function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity, guideUrl: string, webhooks: WebhookService): McpServer {
+function createAgentServer(chat: ChatService, events: EventsService, agent: AgentIdentity, guideUrl: string, webhooks: WebhookService, debug?: DebugLog): McpServer {
   const capabilities = {
     events: { listChanged: false },
     extensions: { "io.modelcontextprotocol/events": { listChanged: false } }
@@ -146,7 +147,11 @@ function createAgentServer(chat: ChatService, events: EventsService, agent: Agen
   }, async ({ channelId, text }) => guardedTool(() => ({ message: chat.postMessage(agent, channelId, text) })));
 
   server.server.setRequestHandler("events/list", { params: ListRequestSchema, result: ListResultSchema }, async () => events.list());
-  server.server.setRequestHandler("events/poll", { params: PollRequestSchema, result: PollResultSchema }, async (params) => events.poll(agent, params));
+  server.server.setRequestHandler("events/poll", { params: PollRequestSchema, result: PollResultSchema }, async (params) => {
+    const result = events.poll(agent, params);
+    debug?.record("events.polled", { actor: agent, mode: "poll", count: result.events.length, truncated: result.truncated, hasMore: result.hasMore });
+    return result;
+  });
   server.server.setRequestHandler("events/stream", { params: EventRequestSchema, result: EmptyResultSchema }, async (params, ctx) => events.stream(agent, params, ctx));
   server.server.setRequestHandler("events/subscribe", { params: SubscribeRequestSchema, result: SubscribeResultSchema }, async (params) => webhooks.subscribe(agent, params));
   server.server.setRequestHandler("events/unsubscribe", { params: UnsubscribeRequestSchema, result: EmptyResultSchema }, async (params) => webhooks.unsubscribe(agent, params));

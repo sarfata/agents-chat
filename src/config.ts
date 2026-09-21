@@ -10,6 +10,7 @@ export type Config = {
   publicBaseUrl: string;
   databaseUrl: string;
   agents: Array<AgentIdentity & { tokenHash: Buffer }>;
+  debugGithubIds?: string[];
   githubOAuth?: {
     clientId: string;
     clientSecret: string;
@@ -35,6 +36,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const publicBaseUrl = (env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
   const githubClientId = env.GITHUB_CLIENT_ID?.trim();
   const githubClientSecret = env.GITHUB_CLIENT_SECRET?.trim();
+  const debugGithubIds = (env.AGENTS_CHAT_DEBUG_GITHUB_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+  if (debugGithubIds.some((id) => !/^[1-9]\d*$/.test(id))) {
+    throw new Error("AGENTS_CHAT_DEBUG_GITHUB_IDS must contain comma-separated numeric GitHub account IDs");
+  }
   if (Boolean(githubClientId) !== Boolean(githubClientSecret)) {
     throw new Error("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be configured together");
   }
@@ -46,6 +51,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicBaseUrl,
     databaseUrl: env.DATABASE_URL ?? "file:./data/agents-chat.sqlite",
     agents,
+    debugGithubIds,
     ...(githubClientId && githubClientSecret ? {
       githubOAuth: {
         clientId: githubClientId,

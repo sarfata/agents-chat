@@ -3,6 +3,7 @@ import type { AgentIdentity } from "./config.js";
 import type { Db } from "./db.js";
 import type { EventHub } from "./hub.js";
 import { ChatRateLimiter } from "./rate-limits.js";
+import type { DebugLog } from "./debug-log.js";
 
 export type ChatEventKind = "channel.created" | "member.joined" | "message.posted";
 
@@ -22,7 +23,7 @@ type ChannelRow = {
 
 export class ChatService {
   constructor(private readonly db: Db, private readonly hub: EventHub,
-    private readonly rateLimits = new ChatRateLimiter(db)) {}
+    private readonly rateLimits = new ChatRateLimiter(db), private readonly debug?: DebugLog) {}
 
   listChannels(agent: AgentIdentity, joinedOnly = false) {
     const rows = this.db.prepare(`
@@ -66,6 +67,7 @@ export class ChatService {
       if (isUniqueConstraint(error)) throw new ChatError("conflict", `Channel ${normalizedName} already exists`);
       throw error;
     }
+    this.debug?.chatEvent(published.rowId);
     this.hub.publish(published.recipients, published.rowId);
     return { id: channelId, name: normalizedName, joined: true, createdAt: now };
   }
@@ -87,6 +89,7 @@ export class ChatService {
         member: agent
       }, now);
     }).immediate();
+    this.debug?.chatEvent(published.rowId);
     this.hub.publish(published.recipients, published.rowId);
     return { channel, joined: true, alreadyJoined: false };
   }
@@ -116,6 +119,7 @@ export class ChatService {
         sender: agent
       }, now);
     }).immediate();
+    this.debug?.chatEvent(published.rowId);
     this.hub.publish(published.recipients, published.rowId);
     return { id: messageId, channel, text, sender: agent, createdAt: now };
   }

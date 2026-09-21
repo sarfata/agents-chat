@@ -2,6 +2,8 @@ import { ProtocolError, type RequestId, type ServerContext } from "@modelcontext
 import type { AgentIdentity } from "./config.js";
 import type { Db } from "./db.js";
 import type { EventHub } from "./hub.js";
+import { nanoid } from "nanoid";
+import type { DebugLog } from "./debug-log.js";
 
 export const CHAT_ACTIVITY_EVENT = "agents-chat.activity";
 const DEFAULT_POLL_MS = 2_000;
@@ -24,7 +26,7 @@ type EventRow = {
 };
 
 export class EventsService {
-  constructor(private readonly db: Db, private readonly hub: EventHub) {}
+  constructor(private readonly db: Db, private readonly hub: EventHub, private readonly debug?: DebugLog) {}
 
   list() {
     return {
@@ -107,12 +109,31 @@ export class EventsService {
     const buffered: number[] = [];
     let ready = false;
     let lastSent = start;
+    let stopped = false;
     let end!: () => void;
     const ended = new Promise<void>((resolve) => { end = resolve; });
     let queue = Promise.resolve();
+    const subscriptionId = `push_${nanoid(20)}`;
+    const details = { actor: agent, mode: "push" as const, subscriptionId };
+    let reason: "cancelled" | "transport_error" = "cancelled";
+    let active = false;
 
     const notify = (method: string, params: Record<string, unknown>) => {
-      queue = queue.then(() => ctx.mcpReq.notify({ method, params })).catch(end);
+      queue = queue.then(async () => {
+        if (stopped) return;
+        await ctx.mcpReq.notify({ method, params });
+        if (method === "notifications/events/active") {
+          active = true;
+          this.debug?.record("subscription.created", { ...details, truncated });
+        } else if (method === "notifications/events/event") {
+          this.debug?.record("delivery.sent", { ...details, eventId: String(params.eventId) });
+        }
+      }).catch(() => {
+        reason = "transport_error";
+        stopped = true;
+        this.debug?.record("delivery.failed", { ...details, reason });
+        end();
+      });
       return queue;
     };
     const sendRow = (row: EventRow) => {
@@ -125,28 +146,35 @@ export class EventsService {
       const row = this.row(agent.id, rowId);
       if (row) sendRow(row);
     });
-    const abort = () => end();
+    const abort = () => { stopped = true; end(); };
     ctx.mcpReq.signal.addEventListener("abort", abort, { once: true });
+    if (ctx.mcpReq.signal.aborted) abort();
 
-    await notify("notifications/events/active", withSubscriptionId({ cursor: formatCursor(start), truncated }, ctx.mcpReq.id));
-    if (requested !== null) {
-      for (const row of this.rowsAfter(agent.id, start, cutoff, 1_000)) sendRow(row);
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    try {
+      await notify("notifications/events/active", withSubscriptionId({ cursor: formatCursor(start), truncated }, ctx.mcpReq.id));
+      if (!stopped && requested !== null) {
+        for (const row of this.rowsAfter(agent.id, start, cutoff, 1_000)) sendRow(row);
+      }
+      ready = true;
+      for (const rowId of buffered.sort((a, b) => a - b)) {
+        if (stopped) break;
+        const row = this.row(agent.id, rowId);
+        if (row) sendRow(row);
+      }
+      heartbeat = setInterval(() => {
+        void notify("notifications/events/heartbeat", withSubscriptionId({ cursor: formatCursor(this.head()) }, ctx.mcpReq.id));
+      }, 25_000);
+      heartbeat.unref?.();
+      await ended;
+    } finally {
+      stopped = true;
+      clearInterval(heartbeat);
+      off();
+      ctx.mcpReq.signal.removeEventListener("abort", abort);
+      await queue;
+      if (active) this.debug?.record("subscription.closed", { ...details, reason });
     }
-    ready = true;
-    for (const rowId of buffered.sort((a, b) => a - b)) {
-      const row = this.row(agent.id, rowId);
-      if (row) sendRow(row);
-    }
-
-    const heartbeat = setInterval(() => {
-      void notify("notifications/events/heartbeat", withSubscriptionId({ cursor: formatCursor(this.head()) }, ctx.mcpReq.id));
-    }, 25_000);
-    heartbeat.unref?.();
-    await ended;
-    clearInterval(heartbeat);
-    off();
-    ctx.mcpReq.signal.removeEventListener("abort", abort);
-    await queue;
     return { _meta: {} };
   }
 

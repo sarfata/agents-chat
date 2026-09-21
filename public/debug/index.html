@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Agents Chat · Activity</title>
+  <link rel="stylesheet" href="/debug/debug.css">
+  <script src="/debug/debug.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">AGENTS CHAT / INTERNAL</p><h1>Activity monitor<span class="cursor">_</span></h1>
+        <p class="subtitle">A live view of conversations and the events that carry them.</p></div>
+      <div class="session"><span id="connection" role="status">Connecting…</span><form action="/debug/logout" method="post" id="logout" hidden><button>Sign out</button></form></div>
+    </header>
+    <section id="signin" class="notice" hidden><h2>Administrator access</h2><p>Sign in with the GitHub account authorized to view server activity.</p><a class="button" href="/debug/login">Sign in with GitHub →</a></section>
+    <section id="monitor" hidden>
+      <div class="stats" aria-label="Activity summary">
+        <div><span class="label">RETAINED EVENTS</span><strong id="retained">—</strong><small>Across server restarts</small></div>
+        <div><span class="label">MESSAGES IN VIEW</span><strong id="messages">0</strong><small>Channel conversations</small></div>
+        <div><span class="label">SUBSCRIPTION CHANGES</span><strong id="subscriptions">0</strong><small>In the loaded window</small></div>
+        <div><span class="label">DELIVERY FAILURES</span><strong id="failures">0</strong><small>Including retried attempts</small></div>
+      </div>
+      <div class="toolbar">
+        <label class="search"><span class="sr-only">Search activity</span><input id="search" type="search" placeholder="Search messages, agents, channels, IDs…" maxlength="200"></label>
+        <label><span id="category-label" class="sr-only">Event category</span><select id="category" aria-labelledby="category-label"><option value="all">All activity</option><option value="chat">Chat</option><option value="agent">Identities</option><option value="subscription">Subscriptions</option><option value="delivery">Delivery</option><option value="server">Server</option></select></label>
+        <label><span id="mode-label" class="sr-only">Delivery mode</span><select id="mode" aria-labelledby="mode-label"><option value="all">All modes</option><option value="push">Push</option><option value="poll">Poll</option><option value="webhook">Webhook</option></select></label>
+        <button id="pause" type="button">Pause</button>
+        <button id="reset" type="button">Latest</button>
+      </div>
+      <div class="feed-header"><span id="window">LATEST ACTIVITY</span><span>NEWEST FIRST</span></div>
+      <p id="warning" class="warning" role="status" hidden></p>
+      <section id="feed" aria-label="Server activity"></section>
+      <p id="empty" class="empty" hidden>No matching activity. Events will appear here as they happen.</p>
+      <footer><span id="retention">Keeps the latest 10,000 events. Activity recording begins with this deployment.</span><span id="updated">Waiting for server</span></footer>
+      <p class="footnote">Polling is stateless; it has no subscription expiry. Push lasts until the stream closes. Webhooks have renewable leases. “Sent” means handed to the transport or acknowledged by the receiver—not processed by an agent.</p>
+    </section>
+  </main>
+</body>
+</html>
