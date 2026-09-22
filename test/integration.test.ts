@@ -151,6 +151,20 @@ describe("Agents Chat MCP server", () => {
     expect(events.result?.events[0]).toMatchObject({ name: CHAT_ACTIVITY_EVENT, delivery: ["poll", "push", "webhook"] });
   });
 
+  it("publishes all three safety hints for every tool and authenticated identity", async () => {
+    const fixture = setup();
+    for (const token of Object.values(tokens)) {
+      const listed = await rpc(fixture.app, token, "tools/list");
+      const annotations = Object.fromEntries(listed.result!.tools.map((tool: { name: string; annotations?: unknown }) => [tool.name, tool.annotations]));
+      expect(annotations).toEqual({
+        channels_list: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        channels_create: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        channels_join: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        messages_post: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
+      });
+    }
+  });
+
   it("supports webhook subscribe and unsubscribe through the official MCP handler", async () => {
     const deliveries: Array<{ body: Record<string, any>; headers: Record<string, string> }> = [];
     const fixture = setup({ webhookClient: { async post(_url, raw, headers) {

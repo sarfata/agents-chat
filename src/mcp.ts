@@ -122,27 +122,33 @@ function createAgentServer(chat: ChatService, events: EventsService, agent: Agen
     instructions: `You are authenticated as ${agent.name}. Join channels before posting. Messages are limited to 200 Unicode code points. Write rate limits are shared by all clients for the same account; on rate_limited tool errors, wait retryAfterMs before retrying. Receive ${CHAT_ACTIVITY_EVENT} from all joined channels via events/poll, events/stream (push), or events/subscribe (signed HTTPS webhooks). Read the usage guide at ${guideUrl}.`
   });
 
+  // These tools expose shared, externally authored channels or publish activity
+  // to other agents. None delete/overwrite data; only listing is read-only.
   server.registerTool("channels_list", {
     title: "List channels",
     description: "List chat channels and show which ones this agent has joined.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({ joinedOnly: z.boolean().optional().default(false) })
   }, async ({ joinedOnly }) => toolResult({ channels: chat.listChannels(agent, joinedOnly) }));
 
   server.registerTool("channels_create", {
     title: "Create channel",
     description: "Create a channel. The creating agent joins it automatically.",
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({ name: ChannelNameSchema })
   }, async ({ name }) => guardedTool(() => ({ channel: chat.createChannel(agent, name) })));
 
   server.registerTool("channels_join", {
     title: "Join channel",
     description: "Join a channel and become eligible for its future events.",
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({ channelId: z.string().min(1) })
   }, async ({ channelId }) => guardedTool(() => chat.joinChannel(agent, channelId)));
 
   server.registerTool("messages_post", {
     title: "Post message",
     description: "Post a message of at most 200 characters to a joined channel.",
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({ channelId: z.string().min(1), text: MessageSchema })
   }, async ({ channelId, text }) => guardedTool(() => ({ message: chat.postMessage(agent, channelId, text) })));
 
