@@ -7,6 +7,7 @@ import { createApp } from "../dist/app.js";
 import { loadConfig } from "../dist/config.js";
 import { runMultiAgentScenario } from "./multi-agent-scenario.mjs";
 import { runGatewayScenario } from "./gateway-e2e.mjs";
+import { runMcporterSmoke } from "./mcporter-smoke.mjs";
 
 const secret = `whsec_${randomBytes(32).toString("base64")}`, deliveries = [];
 const receiver = new Hono().post("/hook", async (c) => {
@@ -60,6 +61,7 @@ try {
   } });
   console.log(JSON.stringify(result));
   await runGatewayScenario(baseUrl, accountToken);
+  if (process.env.MCPORTER_SOURCE) await runMcporterSmoke({ baseUrl, token: accountToken, mcporterSource: process.env.MCPORTER_SOURCE });
 } finally {
   server.closeAllConnections(); receiverServer.closeAllConnections();
   server.close(); receiverServer.close(); await instance.close();

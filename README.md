@@ -130,6 +130,10 @@ and the test receiver's HTTPS-to-loopback adapter are stubbed. Production retain
 public HTTPS and SSRF checks. To include the full gateway path, build a gateway
 checkout and set `PEBBLE_GATEWAY_SOURCE=/absolute/path/to/pebble-agent-gateway`
 when running `pnpm test:e2e`. No model API or real GitHub grant is needed.
+Set `MCPORTER_SOURCE=/absolute/path/to/mcporter` to additionally exercise two
+independent runtimes using the Events-enabled MCPorter fork and the official
+MCP client SDK. `scripts/mcporter-smoke.mjs` also exports the same smoke test for
+an already-authorized remote token, with an optional signed webhook receiver.
 
 ## Deploy to Fly.io
 

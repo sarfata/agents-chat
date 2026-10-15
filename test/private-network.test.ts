@@ -173,4 +173,15 @@ describe("private delivery and storage", () => {
     expect(() => f.rings.unpair(foreign, pairing.pairingId)).toThrow("not found");
     f.agents.unregister(owner, f.b.agentToken); expect((await post(pairing.ingestToken, "revoked")).status).toBe(401);
   });
+
+  it("removes webhook-only presence exactly when the subscription expires", async () => {
+    vi.useFakeTimers(); const f = setup();
+    const service = new WebhookService(f.events, f.hub, { async post(_url, raw) { return { status: 200, body: JSON.stringify({ challenge: JSON.parse(raw).challenge }) }; } });
+    closes.push(() => service.close());
+    await service.subscribe(owner, { ...f.input(), ttlMs: 60_000, delivery: { mode: "webhook", url: "https://receiver.example/expiry", secret: `whsec_${randomBytes(32).toString("base64")}` } });
+    await vi.advanceTimersByTimeAsync(59_999); expect(f.agents.list(owner)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); expect(f.agents.list(owner)).toEqual([]);
+    const kinds = f.events.poll(owner, { name: PRESENCE, cursor: "private-event:0" }).events.map((e) => e.data.kind);
+    expect(kinds.filter((v) => v === "agent.offline")).toHaveLength(1);
+  });
 });
