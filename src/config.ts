@@ -1,14 +1,16 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 export type AgentIdentity = {
   id: string;
   name: string;
+  ownerId?: string;
 };
 
 export type Config = {
   port: number;
   publicBaseUrl: string;
   databaseUrl: string;
+  payloadEncryptionKey: Buffer;
   agents: Array<AgentIdentity & { tokenHash: Buffer }>;
   debugGithubIds?: string[];
   githubOAuth?: {
@@ -46,10 +48,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (agents.length === 0 && !githubClientId) {
     throw new Error("Configure GitHub OAuth or at least one static agent token");
   }
+  const databaseUrl = env.DATABASE_URL ?? "file:./data/agents-chat.sqlite";
+  const payloadEncryptionKey = env.AGENTS_CHAT_ENCRYPTION_KEY
+    ? Buffer.from(env.AGENTS_CHAT_ENCRYPTION_KEY, "base64") : randomBytes(32);
+  if (payloadEncryptionKey.length !== 32 || (!env.AGENTS_CHAT_ENCRYPTION_KEY && databaseUrl !== ":memory:")) {
+    throw new Error("Set AGENTS_CHAT_ENCRYPTION_KEY to a stable base64-encoded 32-byte key for persistent private messages");
+  }
   return {
     port: Number(env.PORT ?? "3000"),
     publicBaseUrl,
-    databaseUrl: env.DATABASE_URL ?? "file:./data/agents-chat.sqlite",
+    databaseUrl,
+    payloadEncryptionKey,
     agents,
     debugGithubIds,
     ...(githubClientId && githubClientSecret ? {

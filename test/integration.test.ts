@@ -145,7 +145,7 @@ describe("Agents Chat MCP server", () => {
     expect(initialized.result?.capabilities.extensions["io.modelcontextprotocol/events"]).toEqual({ listChanged: false });
     const tools = await rpc(fixture.app, tokens.alice, "tools/list");
     expect(tools.result?.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
-      "channels_create", "channels_join", "channels_list", "messages_post"
+      "agents_list", "agents_register", "agents_renew", "agents_unregister", "channels_create", "channels_join", "channels_list", "messages_post", "messages_send", "rings_pair", "rings_unpair"
     ]);
     const events = await rpc(fixture.app, tokens.alice, "events/list");
     expect(events.result?.events[0]).toMatchObject({ name: CHAT_ACTIVITY_EVENT, delivery: ["poll", "push", "webhook"] });
@@ -157,6 +157,13 @@ describe("Agents Chat MCP server", () => {
       const listed = await rpc(fixture.app, token, "tools/list");
       const annotations = Object.fromEntries(listed.result!.tools.map((tool: { name: string; annotations?: unknown }) => [tool.name, tool.annotations]));
       expect(annotations).toEqual({
+        agents_list: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        agents_register: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        agents_renew: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        agents_unregister: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+        messages_send: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        rings_pair: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+        rings_unpair: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
         channels_list: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
         channels_create: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
         channels_join: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -183,28 +190,29 @@ describe("Agents Chat MCP server", () => {
     await rpc(fixture.app, tokens.alice, "events/unsubscribe", { name: CHAT_ACTIVITY_EVENT, delivery: { url: delivery.url } });
   });
 
-  it("creates, lists, joins, posts, and isolates event history by membership", async () => {
+  it("creates private channels and rejects cross-account discovery, joins and messages", async () => {
     const fixture = setup();
     const charlieStart = await rpc(fixture.app, tokens.charlie, "events/poll", { name: CHAT_ACTIVITY_EVENT, cursor: null });
-    expect(charlieStart.result?.cursor).toBe("chat-event:0");
+    expect(charlieStart.result?.cursor).toBe("private-event:0");
 
     const created = await callTool(fixture.app, tokens.alice, "channels_create", { name: "General" });
     const channel = created.structuredContent?.channel;
     expect(channel).toMatchObject({ name: "general", joined: true });
     const bobList = await callTool(fixture.app, tokens.bob, "channels_list");
-    expect(bobList.structuredContent?.channels[0]).toMatchObject({ id: channel.id, joined: false, memberCount: 1 });
+    expect(bobList.structuredContent?.channels).toEqual([]);
 
     const bobStart = await rpc(fixture.app, tokens.bob, "events/poll", { name: CHAT_ACTIVITY_EVENT, cursor: null });
-    expect(bobStart.result?.cursor).toBe("chat-event:1");
-    await callTool(fixture.app, tokens.bob, "channels_join", { channelId: channel.id });
+    expect(bobStart.result?.cursor).toBe("private-event:0");
+    expect((await callTool(fixture.app, tokens.bob, "channels_join", { channelId: channel.id })).isError).toBe(true);
     await callTool(fixture.app, tokens.alice, "messages_post", { channelId: channel.id, text: "hello agents" });
 
     const bobEvents = await rpc(fixture.app, tokens.bob, "events/poll", {
       name: CHAT_ACTIVITY_EVENT,
       cursor: bobStart.result?.cursor
     });
-    expect(bobEvents.result?.events.map((event: any) => event.data.kind)).toEqual(["member.joined", "message.posted"]);
-    expect(bobEvents.result?.events[1].data).toMatchObject({
+    expect(bobEvents.result?.events).toEqual([]);
+    const ownEvents = await rpc(fixture.app, tokens.alice, "events/poll", { name: CHAT_ACTIVITY_EVENT, cursor: "private-event:0" });
+    expect(ownEvents.result?.events[1].data).toMatchObject({
       channel: { id: channel.id, name: "general" },
       message: { text: "hello agents" },
       sender: { name: "alice" }
@@ -215,7 +223,7 @@ describe("Agents Chat MCP server", () => {
       cursor: charlieStart.result?.cursor
     });
     expect(charlieEvents.result?.events).toEqual([]);
-    expect(charlieEvents.result?.cursor).toBe("chat-event:3");
+    expect(charlieEvents.result?.cursor).toBe("private-event:0");
     const rejected = await callTool(fixture.app, tokens.charlie, "messages_post", { channelId: channel.id, text: "nope" });
     expect(rejected.isError).toBe(true);
   });
@@ -234,13 +242,13 @@ describe("Agents Chat MCP server", () => {
     const fixture = setup();
     const created = await callTool(fixture.app, tokens.alice, "channels_create", { name: "live" });
     const channelId = created.structuredContent?.channel.id;
-    await callTool(fixture.app, tokens.bob, "channels_join", { channelId });
+    await callTool(fixture.app, tokens.alice, "channels_join", { channelId });
     const abort = new AbortController();
     const response = await fixture.app.request("/mcp", {
       method: "POST",
       signal: abort.signal,
       headers: {
-        Authorization: `Bearer ${tokens.bob}`,
+        Authorization: `Bearer ${tokens.alice}`,
         Accept: "application/json, text/event-stream",
         "Content-Type": "application/json",
         Host: "chat.example.test"

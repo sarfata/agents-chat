@@ -61,7 +61,7 @@ describe("webhook delivery", () => {
   it("verifies intent, signs events, refreshes idempotently, and stops on unsubscribe", async () => {
     const f = setup();
     const subscribed = await f.service.subscribe(alice, input);
-    expect(subscribed).toMatchObject({ cursor: "chat-event:1", truncated: false, deliveryStatus: { active: true } });
+    expect(subscribed).toMatchObject({ cursor: "private-event:1", truncated: false, deliveryStatus: { active: true } });
     expect(f.receiver.events()).toHaveLength(0);
     verify(f.receiver.challenges()[0]);
     expect(f.receiver.challenges()[0].headers["webhook-id"]).toMatch(/^msg_verification_/);
@@ -69,13 +69,13 @@ describe("webhook delivery", () => {
     await vi.advanceTimersByTimeAsync(0);
     const delivered = f.receiver.events()[0];
     verify(delivered);
-    expect(delivered.body).toMatchObject({ name: CHAT_ACTIVITY_EVENT, cursor: "chat-event:2", data: { kind: "message.posted", message: { text: "signed event" } } });
+    expect(delivered.body).toMatchObject({ name: CHAT_ACTIVITY_EVENT, cursor: "private-event:2", data: { kind: "message.posted", message: { text: "signed event" } } });
     expect(delivered.headers["webhook-id"]).toBe(delivered.body.eventId);
     const polled = f.events.poll(alice, { name: CHAT_ACTIVITY_EVENT, cursor: subscribed.cursor });
     expect(polled.events[0].eventId).toBe(delivered.body.eventId);
     const refreshed = await f.service.subscribe(alice, { ...input, cursor: subscribed.cursor });
     expect(refreshed.id).toBe(subscribed.id);
-    expect(refreshed.cursor).toBe("chat-event:2");
+    expect(refreshed.cursor).toBe("private-event:2");
     expect(f.receiver.challenges()).toHaveLength(1);
     await f.service.unsubscribe(alice, input);
     f.chat.postMessage(alice, f.channel.id, "after unsubscribe");
@@ -93,11 +93,12 @@ describe("webhook delivery", () => {
     f.chat.postMessage(alice, f.channel.id, "before bob joined");
     await vi.advanceTimersByTimeAsync(1000);
     expect(f.receiver.events()).toHaveLength(1);
-    f.chat.joinChannel(bob, f.channel.id);
-    f.chat.postMessage(alice, f.channel.id, "both members");
+    expect(() => f.chat.joinChannel(bob, f.channel.id)).toThrow("Channel not found");
+    const privateChannel = f.chat.createChannel(bob, "test"); // Same name, different account.
+    f.chat.postMessage(bob, privateChannel.id, "bob's private message");
     await vi.advanceTimersByTimeAsync(2000);
     const bobEvents = f.receiver.events().filter((d) => d.headers["X-MCP-Subscription-Id"] === b.id);
-    expect(bobEvents.map((d) => d.body.data.kind)).toEqual(["member.joined", "message.posted"]);
+    expect(bobEvents.map((d) => d.body.data.kind)).toEqual(["channel.created", "message.posted"]);
     await f.service.unsubscribe(bob, input);
     expect((await f.service.subscribe(alice, input)).id).toBe(a.id);
     const anotherUrl = { ...input, delivery: { ...input.delivery, url: "https://receiver.example/alice-only" } };
@@ -121,8 +122,8 @@ describe("webhook delivery", () => {
     expect(deliveries[0].headers["webhook-id"]).toBe(deliveries[1].headers["webhook-id"]);
     expect(deliveries[0].headers["webhook-timestamp"]).not.toBe(deliveries[1].headers["webhook-timestamp"]);
     deliveries.forEach((d) => verify(d));
-    expect(deliveries[2].body.cursor).toBe("chat-event:3");
-    expect((await f.service.subscribe(alice, input)).cursor).toBe("chat-event:3");
+    expect(deliveries[2].body.cursor).toBe("private-event:3");
+    expect((await f.service.subscribe(alice, input)).cursor).toBe("private-event:3");
   });
 
   it.each([410, 413])("does not retry HTTP %i and continues the subscription", async (status) => {
@@ -145,7 +146,7 @@ describe("webhook delivery", () => {
     const result = await f.service.subscribe(alice, input);
     expect(result.deliveryStatus.lastError).toBe("http_5xx");
     expect(JSON.stringify(result)).not.toContain("private response");
-    expect(result.cursor).toBe("chat-event:2");
+    expect(result.cursor).toBe("private-event:2");
   });
 
   it("aborts sleeping retries on unsubscribe and lease expiry", async () => {
@@ -211,11 +212,11 @@ describe("webhook delivery", () => {
     f.chat.postMessage(alice, f.channel.id, "recent message");
     const sub = await f.service.subscribe(alice, { ...input, cursor: start, maxAgeMs: 1000 });
     expect(sub.truncated).toBe(true);
-    expect(sub.cursor).toBe("chat-event:2");
+    expect(sub.cursor).toBe("private-event:2");
     await vi.advanceTimersByTimeAsync(1000);
     expect(f.receiver.events().map((d) => d.body.data.message.text)).toEqual(["recent message"]);
     f.chat.createChannel(bob, "bob-private-history");
-    expect((await f.service.subscribe(alice, input)).cursor).toBe("chat-event:4");
+    expect((await f.service.subscribe(alice, input)).cursor).toBe("private-event:3");
   });
 
   it("rejects invalid parameters and failed endpoint verification without leaking responses", async () => {
@@ -227,7 +228,7 @@ describe("webhook delivery", () => {
       { ...input.delivery, secret: "not-a-secret" }
     ]) await expect(f.service.subscribe(alice, { ...input, delivery })).rejects.toMatchObject({ code: -32602 });
     await expect(f.service.subscribe(alice, { ...input, arguments: { channel: "wrong" } })).rejects.toMatchObject({ code: -32602 });
-    await expect(f.service.subscribe(alice, { ...input, cursor: "chat-event:999999999999999999999" })).rejects.toMatchObject({ code: -32602 });
+    await expect(f.service.subscribe(alice, { ...input, cursor: "private-event:999999999999999999999" })).rejects.toMatchObject({ code: -32602 });
     await expect(f.service.subscribe(alice, { ...input, delivery: { ...input.delivery, mode: "push" } })).rejects.toMatchObject({ code: -32014 });
     expect(f.receiver.deliveries).toHaveLength(0);
     f.receiver.rejectChallenge = true;

@@ -4,6 +4,7 @@ import type { Db } from "./db.js";
 export const DEBUG_RETENTION = 10_000;
 const kindSchema = z.enum([
   "server.started", "server.stopped", "agent.registered", "agent.authenticated",
+  "runtime.registered", "runtime.unregistered", "message.sent", "ring.message_received",
   "channel.created", "member.joined", "message.posted", "events.polled",
   "subscription.created", "subscription.renewed", "subscription.expired", "subscription.closed",
   "webhook.verified", "webhook.verification_failed", "delivery.attempted", "delivery.sent",
@@ -57,11 +58,9 @@ export class DebugLog {
 
   chatEvent(rowId: number) {
     try {
-      const row = this.db.prepare(`select kind, event_id, data_json from chat_events where id = ?`).get(rowId) as
-        { kind: "channel.created" | "member.joined" | "message.posted"; event_id: string; data_json: string };
-      const data = JSON.parse(row.data_json);
-      this.record(row.kind, { eventId: row.event_id, actor: data.actor ?? data.member ?? data.sender,
-        channel: data.channel, ...(row.kind === "message.posted" ? { message: data.message } : {}) });
+      const row = this.db.prepare(`select kind, event_id from account_events where id = ?`).get(rowId) as
+        { kind: "channel.created" | "member.joined" | "message.posted"; event_id: string };
+      this.record(row.kind, { eventId: row.event_id });
     } catch {
       this.failures++;
     }

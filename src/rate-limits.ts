@@ -1,11 +1,13 @@
 import type { Db } from "./db.js";
 
-export type ChatAction = "messages_post" | "channels_create" | "channels_join";
+export type ChatAction = "messages_post" | "channels_create" | "channels_join" | "agents_register" | "rings_pair";
 type Limit = { capacity: number; periodMs: number };
 
 // Full buckets refill continuously over periodMs. All buckets for an action
 // must admit it. These are account budgets, never per-token/session budgets.
 export const CHAT_RATE_LIMITS: Record<ChatAction, readonly Limit[]> = {
+  agents_register: [{ capacity: 32, periodMs: 60_000 }],
+  rings_pair: [{ capacity: 10, periodMs: 60_000 }],
   messages_post: [{ capacity: 60, periodMs: 60_000 }, { capacity: 1000, periodMs: 3_600_000 }],
   channels_create: [{ capacity: 5, periodMs: 3_600_000 }, { capacity: 20, periodMs: 86_400_000 }],
   channels_join: [{ capacity: 30, periodMs: 60_000 }]

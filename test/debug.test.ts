@@ -14,7 +14,7 @@ const cleanups: Array<() => unknown> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const base = "https://chat.example.test";
 const alice = { id: "alice", name: "Alice" };
-const bob = { id: "bob", name: "Bob" };
+const bob = { id: "bob", name: "Bob", ownerId: alice.id };
 
 function setup(ids = "1234", githubId = 1234) {
   const config = loadConfig({ PUBLIC_BASE_URL: base, DATABASE_URL: ":memory:",
@@ -143,7 +143,7 @@ describe("administrator debug view", () => {
 });
 
 describe("bounded activity recording", () => {
-  it("captures only committed chat changes, preserving message text and event correlation", () => {
+  it("captures committed event metadata without retaining private message text", () => {
     const f = services();
     const channel = f.chat.createChannel(alice, "test");
     f.chat.joinChannel(bob, channel.id);
@@ -153,8 +153,9 @@ describe("bounded activity recording", () => {
     expect(() => f.chat.postMessage(alice, channel.id, "a".repeat(201))).toThrow();
     const result = f.log.read();
     expect(result.events.map((e) => e.kind)).toEqual(["channel.created", "member.joined", "message.posted"]);
-    expect(result.events[2].details).toMatchObject({ actor: bob, channel: { id: channel.id, name: "test" }, message: { text: "<script>untrusted message</script>" } });
-    expect(result.events[2].details.eventId).toBe((f.db.prepare(`select event_id from chat_events order by id desc limit 1`).get() as any).event_id);
+    expect(result.events[2].details.message).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("<script>untrusted message</script>");
+    expect(result.events[2].details.eventId).toBe((f.db.prepare(`select event_id from account_events order by id desc limit 1`).get() as any).event_id);
   });
 
   it("retains a bounded window across logger recreation with incremental cursors and gap detection", () => {
@@ -238,7 +239,7 @@ describe("bounded activity recording", () => {
     await service.unsubscribe(alice, input);
     expect(f.log.read().events.at(-1)).toMatchObject({ kind: "subscription.closed", details: { reason: "unsubscribed" } });
     rejectVerification = true;
-    await expect(service.subscribe(bob, input)).rejects.toThrow();
+    await expect(service.subscribe({ id: "other-account", name: "Other" }, input)).rejects.toThrow();
     expect(f.log.read().events.at(-1)?.kind).toBe("webhook.verification_failed");
     expect(f.log.read().recordingFailures).toBe(0);
     const serialized = JSON.stringify(f.log.read());

@@ -4,149 +4,84 @@ import type { Db } from "./db.js";
 import type { EventHub } from "./hub.js";
 import { ChatRateLimiter } from "./rate-limits.js";
 import type { DebugLog } from "./debug-log.js";
-
-export type ChatEventKind = "channel.created" | "member.joined" | "message.posted";
+import { ACTIVITY, ownerId, privateStore } from "./private-store.js";
 
 export class ChatError extends Error {
-  constructor(readonly code: "not_found" | "conflict" | "forbidden" | "invalid", message: string) {
-    super(message);
-  }
+  constructor(readonly code: "not_found" | "conflict" | "forbidden" | "invalid", message: string) { super(message); }
 }
 
-type ChannelRow = {
-  id: string;
-  name: string;
-  created_at: string;
-  member_count: number;
-  joined: number;
-};
-
 export class ChatService {
-  constructor(private readonly db: Db, private readonly hub: EventHub,
-    private readonly rateLimits = new ChatRateLimiter(db), private readonly debug?: DebugLog) {}
+  private readonly store;
+  constructor(private readonly db: Db, hub: EventHub,
+    private readonly rateLimits = new ChatRateLimiter(db), private readonly debug?: DebugLog) { this.store = privateStore(db, hub); }
 
   listChannels(agent: AgentIdentity, joinedOnly = false) {
-    const rows = this.db.prepare(`
-      select c.id, c.name, c.created_at,
-        count(m.agent_id) as member_count,
-        max(case when mine.agent_id is not null then 1 else 0 end) as joined
-      from channels c
-      left join memberships m on m.channel_id = c.id
-      left join memberships mine on mine.channel_id = c.id and mine.agent_id = ?
-      ${joinedOnly ? "where mine.agent_id is not null" : ""}
-      group by c.id
-      order by c.name collate nocase
-    `).all(agent.id) as ChannelRow[];
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      memberCount: Number(row.member_count),
-      joined: Boolean(row.joined),
-      createdAt: row.created_at
-    }));
+    const rows = this.db.prepare(`select c.id, c.name, c.created_at, count(m.agent_id) as member_count,
+      max(case when mine.agent_id is not null then 1 else 0 end) as joined
+      from account_channels c left join account_memberships m on m.channel_id = c.id
+      left join account_memberships mine on mine.channel_id = c.id and mine.agent_id = ?
+      where c.owner_id = ? ${joinedOnly ? "and mine.agent_id is not null" : ""}
+      group by c.id order by c.name collate nocase`).all(agent.id, ownerId(agent)) as
+      Array<{ id: string; name: string; created_at: string; member_count: number; joined: number }>;
+    return rows.map((r) => ({ id: r.id, name: r.name, memberCount: r.member_count, joined: Boolean(r.joined), createdAt: r.created_at }));
   }
 
   createChannel(agent: AgentIdentity, name: string) {
-    const normalizedName = name.toLowerCase();
-    const channelId = `channel_${nanoid(16)}`;
-    const now = new Date().toISOString();
-    let published!: { rowId: number; recipients: string[] };
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(name)) throw new ChatError("invalid", "Invalid channel name");
+    const normalizedName = name.toLowerCase(), channelId = `channel_${nanoid(16)}`, now = new Date().toISOString();
+    let event!: ReturnType<typeof this.store.record>;
     try {
       this.db.transaction(() => {
-        this.rateLimits.consume(agent.id, "channels_create");
-        this.db.prepare(`insert into channels(id, name, created_by, created_at) values (?, ?, ?, ?)`)
-          .run(channelId, normalizedName, agent.id, now);
-        this.db.prepare(`insert into memberships(channel_id, agent_id, agent_name, joined_at) values (?, ?, ?, ?)`)
-          .run(channelId, agent.id, agent.name, now);
-        published = this.recordEvent(channelId, "channel.created", {
-          channel: { id: channelId, name: normalizedName },
-          actor: agent
-        }, now);
+        this.rateLimits.consume(ownerId(agent), "channels_create");
+        this.db.prepare(`insert into account_channels values (?, ?, ?, ?, ?)`).run(channelId, ownerId(agent), normalizedName, agent.id, now);
+        this.db.prepare(`insert into account_memberships values (?, ?, ?, ?)`).run(channelId, agent.id, agent.name, now);
+        event = this.record(agent, channelId, "channel.created", { channel: { id: channelId, name: normalizedName }, actor: publicAgent(agent) });
       }).immediate();
     } catch (error) {
-      if (isUniqueConstraint(error)) throw new ChatError("conflict", `Channel ${normalizedName} already exists`);
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) throw new ChatError("conflict", `Channel ${normalizedName} already exists`);
       throw error;
     }
-    this.debug?.chatEvent(published.rowId);
-    this.hub.publish(published.recipients, published.rowId);
+    this.debug?.chatEvent(event.rowId); this.store.publish(event);
     return { id: channelId, name: normalizedName, joined: true, createdAt: now };
   }
 
   joinChannel(agent: AgentIdentity, channelId: string) {
-    const channel = this.channel(channelId);
-    const existing = this.db.prepare(`select 1 from memberships where channel_id = ? and agent_id = ?`)
-      .get(channelId, agent.id);
-    if (existing) return { channel, joined: true, alreadyJoined: true };
-
-    const now = new Date().toISOString();
-    let published!: { rowId: number; recipients: string[] };
-    this.db.transaction(() => {
-      this.rateLimits.consume(agent.id, "channels_join");
-      this.db.prepare(`insert into memberships(channel_id, agent_id, agent_name, joined_at) values (?, ?, ?, ?)`)
-        .run(channelId, agent.id, agent.name, now);
-      published = this.recordEvent(channelId, "member.joined", {
-        channel,
-        member: agent
-      }, now);
+    const channel = this.channel(agent, channelId);
+    if (this.db.prepare(`select 1 from account_memberships where channel_id = ? and agent_id = ?`).get(channelId, agent.id)) {
+      return { channel, joined: true, alreadyJoined: true };
+    }
+    const event = this.db.transaction(() => {
+      this.rateLimits.consume(ownerId(agent), "channels_join");
+      this.db.prepare(`insert into account_memberships values (?, ?, ?, ?)`).run(channelId, agent.id, agent.name, new Date().toISOString());
+      return this.record(agent, channelId, "member.joined", { channel, member: publicAgent(agent) });
     }).immediate();
-    this.debug?.chatEvent(published.rowId);
-    this.hub.publish(published.recipients, published.rowId);
+    this.debug?.chatEvent(event.rowId); this.store.publish(event);
     return { channel, joined: true, alreadyJoined: false };
   }
 
   postMessage(agent: AgentIdentity, channelId: string, text: string) {
-    const channel = this.channel(channelId);
-    const membership = this.db.prepare(`select 1 from memberships where channel_id = ? and agent_id = ?`)
-      .get(channelId, agent.id);
-    if (!membership) throw new ChatError("forbidden", "Join the channel before posting");
-    if (text.length < 1 || [...text].length > 200) {
-      throw new ChatError("invalid", "Messages must contain 1-200 characters");
-    }
-
-    const now = new Date().toISOString();
-    let messageId!: number;
-    let published!: { rowId: number; recipients: string[] };
-    this.db.transaction(() => {
-      this.rateLimits.consume(agent.id, "messages_post");
-      const result = this.db.prepare(`
-        insert into messages(channel_id, agent_id, agent_name, text, created_at)
-        values (?, ?, ?, ?, ?)
-      `).run(channelId, agent.id, agent.name, text, now);
-      messageId = Number(result.lastInsertRowid);
-      published = this.recordEvent(channelId, "message.posted", {
-        channel,
-        message: { id: messageId, text },
-        sender: agent
-      }, now);
+    const channel = this.channel(agent, channelId);
+    if (!this.db.prepare(`select 1 from account_memberships where channel_id = ? and agent_id = ?`).get(channelId, agent.id)) throw new ChatError("forbidden", "Join the channel before posting");
+    if ([...text].length < 1 || [...text].length > 200) throw new ChatError("invalid", "Messages must contain 1-200 characters");
+    const id = `message_${nanoid(20)}`, sender = publicAgent(agent);
+    const event = this.db.transaction(() => {
+      this.rateLimits.consume(ownerId(agent), "messages_post");
+      return this.record(agent, channelId, "message.posted", { channel, message: { id, text }, sender });
     }).immediate();
-    this.debug?.chatEvent(published.rowId);
-    this.hub.publish(published.recipients, published.rowId);
-    return { id: messageId, channel, text, sender: agent, createdAt: now };
+    this.debug?.chatEvent(event.rowId); this.store.publish(event);
+    return { id, channel, text, sender, createdAt: event.occurredAt };
   }
 
-  private channel(channelId: string): { id: string; name: string } {
-    const row = this.db.prepare(`select id, name from channels where id = ?`).get(channelId) as
-      | { id: string; name: string }
-      | undefined;
+  private channel(agent: AgentIdentity, channelId: string) {
+    const row = this.db.prepare(`select id, name from account_channels where id = ? and owner_id = ?`).get(channelId, ownerId(agent)) as { id: string; name: string } | undefined;
     if (!row) throw new ChatError("not_found", "Channel not found");
     return row;
   }
 
-  private recordEvent(channelId: string, kind: ChatEventKind, data: unknown, occurredAt: string) {
-    const eventId = `event_${nanoid(20)}`;
-    const result = this.db.prepare(`
-      insert into chat_events(event_id, channel_id, kind, data_json, occurred_at)
-      values (?, ?, ?, ?, ?)
-    `).run(eventId, channelId, kind, JSON.stringify(data), occurredAt);
-    const rowId = Number(result.lastInsertRowid);
-    const recipients = (this.db.prepare(`select agent_id from memberships where channel_id = ?`)
-      .all(channelId) as Array<{ agent_id: string }>).map((row) => row.agent_id);
-    const insertRecipient = this.db.prepare(`insert into event_recipients(event_row_id, agent_id) values (?, ?)`);
-    for (const recipient of recipients) insertRecipient.run(rowId, recipient);
-    return { rowId, recipients };
+  private record(agent: AgentIdentity, channelId: string, kind: string, data: Record<string, unknown>) {
+    const recipients = (this.db.prepare(`select agent_id from account_memberships where channel_id = ?`).all(channelId) as Array<{ agent_id: string }>).map((r) => r.agent_id);
+    return this.store.record(ownerId(agent), ACTIVITY, kind, { kind, ...data }, recipients);
   }
 }
 
-function isUniqueConstraint(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("UNIQUE constraint failed");
-}
+export const publicAgent = (agent: AgentIdentity) => ({ id: agent.id, name: agent.name });

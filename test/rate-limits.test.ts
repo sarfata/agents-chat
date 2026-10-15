@@ -6,11 +6,12 @@ import { openDb, type Db } from "../src/db.js";
 import { ChatService } from "../src/chat.js";
 import { EventHub } from "../src/hub.js";
 import { ChatRateLimiter, RateLimitError } from "../src/rate-limits.js";
+import { privateStore } from "../src/private-store.js";
 
 const databases: Db[] = [];
 const directories: string[] = [];
 const alice = { id: "user_alice", name: "alice" };
-const bob = { id: "user_bob", name: "bob" };
+const bob = { id: "user_bob", name: "bob", ownerId: alice.id };
 afterEach(() => {
   for (const db of databases.splice(0)) if (db.open) db.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -22,6 +23,7 @@ function setup(path = ":memory:") {
   let now = Date.parse("2026-09-10T12:00:00Z");
   const rateLimits = new ChatRateLimiter(db, () => now);
   const hub = new EventHub();
+  privateStore(db, hub, Buffer.alloc(32, 7));
   const published = vi.spyOn(hub, "publish");
   const chat = new ChatService(db, hub, rateLimits);
   return { db, rateLimits, chat, published, advance: (ms: number) => { now += ms; } };
@@ -124,9 +126,9 @@ describe("rate-limited chat mutations", () => {
     for (let i = 0; i < 60; i++) f.chat.postMessage(alice, channel.id, `message ${i}`);
     const calls = f.published.mock.calls.length;
     expect(() => f.chat.postMessage({ ...alice, name: "renamed" }, channel.id, "blocked")).toThrow(RateLimitError);
-    expect(f.db.prepare(`select count(*) as count from messages`).get()).toEqual({ count: 60 });
-    expect(f.db.prepare(`select count(*) as count from chat_events`).get()).toEqual({ count: 61 });
-    expect(f.db.prepare(`select count(*) as count from event_recipients`).get()).toEqual({ count: 61 });
+    expect(f.db.prepare(`select count(*) as count from account_events where kind = 'message.posted'`).get()).toEqual({ count: 60 });
+    expect(f.db.prepare(`select count(*) as count from account_events`).get()).toEqual({ count: 61 });
+    expect(f.db.prepare(`select count(*) as count from account_event_recipients`).get()).toEqual({ count: 61 });
     expect(f.published).toHaveBeenCalledTimes(calls);
     expect(f.chat.listChannels(alice)).toHaveLength(1);
   });
@@ -147,11 +149,11 @@ describe("rate-limited chat mutations", () => {
     const f = setup();
     const channel = f.chat.createChannel(alice, "test");
     const before = snapshot(f.db);
-    f.db.exec(`create trigger fail_message_event before insert on chat_events
+    f.db.exec(`create trigger fail_message_event before insert on account_events
       when new.kind = 'message.posted' begin select raise(abort, 'injected failure'); end;`);
     expect(() => f.chat.postMessage(alice, channel.id, "rolled back")).toThrow("injected failure");
     expect(snapshot(f.db)).toEqual(before);
-    expect(f.db.prepare(`select count(*) as count from messages`).get()).toEqual({ count: 0 });
+    expect(f.db.prepare(`select count(*) as count from account_events where kind = 'message.posted'`).get()).toEqual({ count: 0 });
     expect(f.published).toHaveBeenCalledTimes(1);
   });
 
@@ -160,13 +162,19 @@ describe("rate-limited chat mutations", () => {
     for (let i = 0; i < 5; i++) f.chat.createChannel(alice, `test-${i}`);
     expect(() => f.chat.createChannel(alice, "blocked")).toThrow(RateLimitError);
     expect(f.chat.listChannels(alice)).toHaveLength(5);
-    expect(f.db.prepare(`select count(*) as count from memberships`).get()).toEqual({ count: 5 });
+    expect(f.db.prepare(`select count(*) as count from account_memberships`).get()).toEqual({ count: 5 });
     expect(f.published).toHaveBeenCalledTimes(5);
   });
 
   it("limits new joins but keeps repeat joins idempotent even while exhausted", () => {
     const f = setup();
-    const channels = Array.from({ length: 31 }, (_, i) => f.chat.createChannel({ id: `owner-${i}`, name: "owner" }, `test-${i}`));
+    // Seed owned channels directly; this test isolates the join budget from
+    // the independent account-wide channel creation budget.
+    const channels = Array.from({ length: 31 }, (_, i) => {
+      const id = `channel-${i}`;
+      f.db.prepare(`insert into account_channels values (?, ?, ?, ?, ?)`).run(id, alice.id, `test-${i}`, `owner-${i}`, new Date().toISOString());
+      return { id };
+    });
     for (const channel of channels.slice(0, 30)) f.chat.joinChannel(alice, channel.id);
     const before = snapshot(f.db);
     const calls = f.published.mock.calls.length;

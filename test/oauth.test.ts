@@ -152,8 +152,8 @@ describe("GitHub-backed MCP OAuth", () => {
       expect(result.structuredContent).toMatchObject({ error: { code: "rate_limited", action: "messages_post", retryAfterMs: 1000 } });
       expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
     }
-    expect(fixture.db.prepare(`select count(*) as count from messages`).get()).toEqual({ count: 60 });
-    expect(fixture.db.prepare(`select count(*) as count from chat_events`).get()).toEqual({ count: 61 });
+    expect(fixture.db.prepare(`select count(*) as count from account_events where kind = 'message.posted'`).get()).toEqual({ count: 60 });
+    expect(fixture.db.prepare(`select count(*) as count from account_events`).get()).toEqual({ count: 61 });
     expect((await tool(second.access_token, "channels_list")).isError).not.toBe(true);
 
     const refreshResponse = await tokenRequest(fixture, {
@@ -172,8 +172,10 @@ describe("GitHub-backed MCP OAuth", () => {
     // display login matches an earlier login of the first account.
     fixture.github.identify.mockResolvedValue({ id: 87654321, login: "octo-agent" });
     const other = await login();
-    expect((await tool(other.access_token, "channels_join", { channelId })).isError).not.toBe(true);
-    expect((await tool(other.access_token, "messages_post", { channelId, text: "independent human budget" })).isError).not.toBe(true);
+    expect((await tool(other.access_token, "channels_join", { channelId })).isError).toBe(true);
+    expect((await tool(other.access_token, "messages_post", { channelId, text: "independent human budget" })).isError).toBe(true);
+    const ownChannel = (await tool(other.access_token, "channels_create", { name: "shared-budget" })).structuredContent.channel;
+    expect((await tool(other.access_token, "messages_post", { channelId: ownChannel.id, text: "independent human budget" })).isError).not.toBe(true);
     expect(fixture.db.prepare(`select count(*) as count from users`).get()).toEqual({ count: 2 });
   });
 

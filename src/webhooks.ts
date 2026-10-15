@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { ProtocolError } from "@modelcontextprotocol/server";
 import type { AgentIdentity } from "./config.js";
-import { CHAT_ACTIVITY_EVENT, type EventRequest, type EventsService } from "./events.js";
+import { type EventRequest, type EventsService } from "./events.js";
+import { ownerId } from "./private-store.js";
 import type { EventHub } from "./hub.js";
 import type { DebugLog } from "./debug-log.js";
 import { SafeWebhookHttpClient, UnsafeWebhookAddressError, classifyWebhookError, parseWebhookUrl, waitFor,
@@ -20,7 +21,7 @@ export type WebhookSubscribeRequest = EventRequest & {
 };
 export type WebhookUnsubscribeRequest = Pick<EventRequest, "name" | "arguments"> & { delivery: { url: string } };
 type Subscription = {
-  id: string; key: string; agent: AgentIdentity; url: string; secret: string;
+  id: string; key: string; agent: AgentIdentity; listener: AgentIdentity; input: EventRequest; url: string; secret: string;
   previousSecret?: { value: string; until: number };
   expiresAt: number; cursor: string; abort: AbortController; off: () => void;
   expiry?: ReturnType<typeof setTimeout>; worker?: Promise<void>;
@@ -48,23 +49,24 @@ export class WebhookService {
     const url = parseWebhookUrl(input.delivery.url).toString();
     decodeSecret(input.delivery.secret);
     const ttl = grantTtl(input.ttlMs);
-    const key = JSON.stringify([agent.id, url, CHAT_ACTIVITY_EVENT, {}]);
+    const listener = this.events.principal(agent, input);
+    const key = JSON.stringify([ownerId(agent), listener.id, url, input.name, {}]);
     return this.exclusive(key, async () => {
       this.stop.signal.throwIfAborted();
       this.removeExpired();
       const existing = this.subscriptions.get(key);
       const previousStatus = existing ? this.status(existing) : undefined;
       if (!existing) {
-        const perAgent = [...this.subscriptions.values()].filter((s) => s.agent.id === agent.id).length
-          + [...this.reservations.values()].filter((id) => id === agent.id).length;
+        const perAgent = [...this.subscriptions.values()].filter((s) => ownerId(s.agent) === ownerId(agent)).length
+          + [...this.reservations.values()].filter((id) => id === ownerId(agent)).length;
         if (perAgent >= MAX_PER_AGENT || this.subscriptions.size + this.reservations.size >= MAX_SUBSCRIPTIONS) {
           throw new ProtocolError(-32013, "ResourceExhausted", { limit: "subscriptions", max: perAgent >= MAX_PER_AGENT ? MAX_PER_AGENT : MAX_SUBSCRIPTIONS });
         }
-        this.reservations.set(key, agent.id);
+        this.reservations.set(key, ownerId(agent));
       }
       try {
         const id = `sub_${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
-        const endpoint = JSON.stringify([agent.id, url]);
+        const endpoint = JSON.stringify([ownerId(agent), listener.id, url]);
         if (!existing && (this.verified.get(endpoint) ?? 0) <= Date.now()) {
           try {
             await this.verify(url, id, input.delivery.secret);
@@ -85,21 +87,23 @@ export class WebhookService {
           existing.expiresAt = now + ttl;
           this.armExpiry(existing);
           if (!existing.worker) {
-            const batch = this.events.poll(agent, { name: CHAT_ACTIVITY_EVENT, cursor: existing.cursor, maxEvents: 1 });
+            const batch = this.events.poll(agent, { ...existing.input, cursor: existing.cursor, maxEvents: 1 });
             if (!batch.events.length) existing.cursor = batch.cursor;
           }
           const result = this.result(existing, false, previousStatus);
           this.debug?.record("subscription.renewed", this.debugDetails(existing));
+          this.events.listen(agent, input, id, "webhook", existing.expiresAt);
           this.wake(existing);
           return result;
         }
         const start = this.events.webhookStart(agent, input);
         const sub: Subscription = {
-          id, key, agent, url, secret: input.delivery.secret, expiresAt: now + ttl,
+          id, key, agent, listener, input: { name: input.name, arguments: input.arguments }, url, secret: input.delivery.secret, expiresAt: now + ttl,
           cursor: start.cursor, abort: new AbortController(), off: () => {}
         };
         this.subscriptions.set(key, sub);
-        sub.off = this.listenForAgent(agent.id);
+        sub.off = this.listenForAgent(listener.id);
+        this.events.listen(agent, input, id, "webhook", sub.expiresAt);
         this.armExpiry(sub);
         const result = this.result(sub, start.truncated);
         this.debug?.record("subscription.created", { ...this.debugDetails(sub), truncated: start.truncated });
@@ -112,7 +116,8 @@ export class WebhookService {
   async unsubscribe(agent: AgentIdentity, input: WebhookUnsubscribeRequest) {
     this.events.webhookStart(agent, input);
     const url = parseWebhookUrl(input.delivery.url).toString();
-    const key = JSON.stringify([agent.id, url, CHAT_ACTIVITY_EVENT, {}]);
+    const listener = this.events.principal(agent, input);
+    const key = JSON.stringify([ownerId(agent), listener.id, url, input.name, {}]);
     return this.exclusive(key, async () => {
       const sub = this.subscriptions.get(key);
       if (!sub || sub.expiresAt <= Date.now()) throw new ProtocolError(-32011, "NotFound", { kind: "subscription" });
@@ -178,7 +183,7 @@ export class WebhookService {
       // unbounded JS queue. Only ACKed/abandoned events advance the watermark.
       while (this.live(sub)) {
         sub.dirty = false;
-        const batch = this.events.poll(sub.agent, { name: CHAT_ACTIVITY_EVENT, cursor: sub.cursor, maxEvents: 1 });
+        const batch = this.events.poll(sub.agent, { ...sub.input, cursor: sub.cursor, maxEvents: 1 });
         const event = batch.events[0];
         if (!event) { sub.cursor = batch.cursor; return; }
         await this.deliver(sub, event.eventId, { ...event, cursor: batch.cursor });
@@ -260,12 +265,17 @@ export class WebhookService {
   private status(sub: Subscription) {
     return { active: this.live(sub), lastDeliveryAt: sub.lastDeliveryAt, lastError: sub.lastError ?? null, failedSince: sub.failedSince };
   }
-  private live(sub: Subscription) { return !sub.abort.signal.aborted && !this.stop.signal.aborted && sub.expiresAt > Date.now(); }
+  private live(sub: Subscription) {
+    if (sub.abort.signal.aborted || this.stop.signal.aborted || sub.expiresAt <= Date.now()) return false;
+    try { this.events.principal(sub.agent, sub.input); return true; } catch { return false; }
+  }
   private listenForAgent(agentId: string) {
     let listener = this.agentListeners.get(agentId);
     if (!listener) {
       listener = { count: 0, off: this.hub.onEvent(agentId, () => {
-        for (const sub of this.subscriptions.values()) if (sub.agent.id === agentId) this.wake(sub);
+        for (const sub of this.subscriptions.values()) if (sub.listener.id === agentId) {
+          if (this.live(sub)) this.wake(sub); else this.remove(sub, "expired");
+        }
       }) };
       this.agentListeners.set(agentId, listener);
     }
@@ -285,6 +295,7 @@ export class WebhookService {
     sub.abort.abort();
     clearTimeout(sub.expiry);
     sub.off();
+    this.events.unlisten(sub.agent, sub.input, sub.id);
     if (this.subscriptions.get(sub.key) === sub) this.subscriptions.delete(sub.key);
     this.debug?.record(reason === "expired" ? "subscription.expired" : "subscription.closed", { ...this.debugDetails(sub), reason });
   }
