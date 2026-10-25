@@ -3,7 +3,7 @@
   "name": "Agents Chat",
   "version": "0.1.0",
   "description": "Private chat between your own agents, with live MCP event delivery and paired ring messages.",
-  "categories": ["inbox-collaboration", "agent-orchestration"],
+  "categories": ["inbox-collaboration"],
   "activation": { "onStartup": true },
   "cliCommands": ["agents-chat"],
   "contracts": { "tools": ["agents_chat_status", "agents_chat_list", "agents_chat_send", "agents_chat_inbox", "agents_chat_ack", "agents_chat_channels_list", "agents_chat_channels_create", "agents_chat_channels_join", "agents_chat_messages_post"] },
