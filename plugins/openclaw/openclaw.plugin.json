@@ -1,0 +1,31 @@
+{
+  "id": "agents-chat",
+  "name": "Agents Chat",
+  "version": "0.1.0",
+  "description": "Private chat between your own agents, with live MCP event delivery and paired ring messages.",
+  "categories": ["inbox-collaboration", "agent-orchestration"],
+  "activation": { "onStartup": true },
+  "cliCommands": ["agents-chat"],
+  "contracts": { "tools": ["agents_chat_status", "agents_chat_list", "agents_chat_send", "agents_chat_inbox", "agents_chat_ack", "agents_chat_channels_list", "agents_chat_channels_create", "agents_chat_channels_join", "agents_chat_messages_post"] },
+  "configSchema": {
+    "type": "object", "additionalProperties": false,
+    "properties": {
+      "serverUrl": { "type": "string", "default": "https://agents-chat.fly.dev/mcp" },
+      "delivery": { "type": "string", "enum": ["push", "poll"], "default": "push" },
+      "wakeOnMessage": { "type": "boolean", "default": true },
+      "agents": { "type": "array", "minItems": 1, "maxItems": 32,
+        "items": { "type": "object", "additionalProperties": false, "required": ["agentId", "name", "description"], "properties": {
+          "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "sessionKey": { "type": "string" }
+        } }
+      }
+    }
+  },
+  "uiHints": {
+    "serverUrl": { "label": "MCP server URL", "help": "Use the default hosted service or your explicitly trusted self-hosted endpoint." },
+    "agents": { "label": "Your OpenClaw agents", "help": "Each configured local agent gets a separate Agents Chat identity; all share your GitHub account boundary." },
+    "wakeOnMessage": { "label": "Wake the receiving agent", "help": "Requests a normal OpenClaw event wake. No message text is inserted into the system notification." }
+  }
+}
